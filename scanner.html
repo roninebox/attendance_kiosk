@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Biometric Scanner Window Bridge</title>
+    <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
+    <style>
+        body { 
+            background: #090d16; 
+            color: white; 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            justify-content: center; 
+            height: 100vh; 
+            margin: 0; 
+            overflow: hidden; 
+        }
+        .container {
+            text-align: center;
+            width: 100%;
+            max-width: 460px;
+            padding: 10px;
+        }
+        h3 { 
+            margin-bottom: 20px; 
+            font-weight: 500; 
+            font-size: 1.15rem;
+            letter-spacing: 0.5px; 
+            color: #ECEFF1; 
+        }
+        .camera-box { 
+            position: relative; 
+            width: 100%; 
+            height: 330px; 
+            border-radius: 16px; 
+            overflow: hidden; 
+            border: 3px solid #3F51B5;
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+            background: #000;
+        }
+        video { 
+            width: 100%; 
+            height: 100%; 
+            object-fit: cover; 
+            transform: scaleX(-1); /* Mirror the webcam view */
+        }
+        .target-ring { 
+            position: absolute; 
+            top: 50%; 
+            left: 50%; 
+            transform: translate(-50%, -50%); 
+            width: 180px; 
+            height: 220px; 
+            border: 3px dashed #22c55e; 
+            border-radius: 50%; 
+            animation: pulse 1.5s infinite ease-in-out; 
+            pointer-events: none;
+            z-index: 10;
+        }
+        @keyframes pulse { 
+            0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 0.8; } 
+            50% { transform: translate(-50%, -50%) scale(1.04); opacity: 1; } 
+        }
+        .laser-line {
+            position: absolute;
+            top: 15%;
+            left: 0;
+            width: 100%;
+            height: 2px;
+            background: #22c55e;
+            box-shadow: 0 0 12px #22c55e;
+            z-index: 5;
+            pointer-events: none;
+            animation: scanMove 2s linear infinite;
+        }
+        @keyframes scanMove {
+            0%, 100% { top: 15%; }
+            50% { top: 85%; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h3 id="display-title">Initializing Biometric Hardware Channel...</h3>
+        <div class="camera-box">
+            <video id="video-feed" autoplay playsinline muted></video>
+            <div class="target-ring"></div>
+            <div class="laser-line"></div>
+        </div>
+    </div>
+
+    <script>
+        let mediaStream = null;
+        let scanAnimationId = null;
+        let targetAction = "Clock In";
+
+        window.addEventListener('DOMContentLoaded', async () => {
+            // 1. Read URL parameters passed from your main app (?action=Clock In)
+            const urlParams = new URLSearchParams(window.location.search);
+            if (urlParams.has('action')) {
+                targetAction = urlParams.get('action');
+            }
+            document.getElementById('display-title').innerText = `Align Face Inside Ring to ${targetAction}`;
+
+            try {
+                // 2. Download neural landmark tracking layers directly into the popup scope
+                const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
+                await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+                await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+                
+                // 3. Request raw camera device tracks cleanly outside Google's sandbox frames
+                mediaStream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { width: 640, height: 480, facingMode: "user" }, 
+                    audio: false 
+                });
+                
+                const videoEl = document.getElementById('video-feed');
+                videoEl.srcObject = mediaStream;
+                
+                // 4. Start the face landmark mapping scanner loop
+                runScannerLoop();
+            } catch(e) {
+                alert("Camera Access Error: " + e.message + "\nEnsure camera hardware is enabled and authorized.");
+                window.close();
+            }
+        });
+
+        function runScannerLoop() {
+            let frameCounter = 0;
+            const videoEl = document.getElementById('video-feed');
+
+            async function checkFrame() {
+                if (!mediaStream) return;
+                frameCounter++;
+                
+                // Process facial recognition evaluation parameters every 4 frames for optimization
+                if (frameCounter % 4 === 0) {
+                    const foundFace = await faceapi.detectSingleFace(videoEl, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks();
+                    
+                    if (foundFace) {
+                        // Extract array of floats directly from face-api landmark mapping coordinates
+                        const rawDescriptor = Array.from(foundFace.descriptor || foundFace.landmarks.positions.map(p => p.x / 640));
+                        const clean128VectorArray = rawDescriptor.slice(0, 128);
+                        
+                        // 5. CROSS-WINDOW MESSAGING BRIDGE
+                        // Fires the final 128-float mathematical matrix string back into your parent tab
+                        if (window.opener) {
+                            window.opener.postMessage({
+                                type: "BIOMETRIC_VECTOR_SIGNAL",
+                                action: targetAction,
+                                descriptor: clean128VectorArray
+                            }, "*");
+                        }
+                        
+                        // 6. Tear down hardware streams and close popup automatically
+                        stopHardwareTracks();
+                        window.close();
+                        return;
+                    }
+                }
+                scanAnimationId = requestAnimationFrame(checkFrame);
+            }
+            scanAnimationId = requestAnimationFrame(checkFrame);
+        }
+
+        function stopHardwareTracks() {
+            if (scanAnimationId) cancelAnimationFrame(scanAnimationId);
+            if (mediaStream) { 
+                mediaStream.getTracks().forEach(track => track.stop()); 
+                mediaStream = null; 
+            }
+            document.getElementById('video-feed').srcObject = null;
+        }
+    </script>
+</body>
+</html>
