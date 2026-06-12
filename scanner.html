@@ -4,156 +4,222 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Biometric Discovery Bridge Node</title>
+    <script defer src="https://cdnjs.cloudflare.com/ajax/libs/tensorflow/3.12.0/tf.min.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
     <style>
-        body { 
-            background: #090d16; 
-            color: white; 
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; 
-            display: flex; 
-            flex-direction: column; 
-            align-items: center; 
-            justify-content: center; 
-            height: 100vh; 
-            margin: 0; 
-            overflow: hidden; 
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background-color: #0f172a;
+            color: #f8fafc;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+            padding: 20px;
         }
-        .container { text-align: center; width: 100%; max-width: 460px; padding: 10px; }
-        h3 { margin-bottom: 20px; font-weight: 500; font-size: 1.15rem; color: #ECEFF1; letter-spacing: 0.5px; }
-        .camera-box { position: relative; width: 100%; height: 330px; border-radius: 16px; overflow: hidden; border: 3px solid #3F51B5; background: #000; }
-        video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
-        .target-ring { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 180px; height: 220px; border: 3px dashed #22c55e; border-radius: 50%; animation: pulse 1.5s infinite ease-in-out; pointer-events: none; z-index: 10; }
-        @keyframes pulse { 0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 0.8; } 50% { transform: translate(-50%, -50%) scale(1.04); opacity: 1; } }
-        .laser-line { position: absolute; top: 15%; left: 0; width: 100%; height: 2px; background: #22c55e; box-shadow: 0 0 12px #22c55e; animation: scanMove 2s linear infinite; pointer-events: none; z-index: 5; }
-        @keyframes scanMove { 0%, 100% { top: 15%; } 50% { top: 85%; } }
+        .scanner-container {
+            position: relative;
+            width: 480px;
+            height: 360px;
+            background: #020617;
+            border-radius: 12px;
+            border: 2px solid #334155;
+            overflow: hidden;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+        }
+        video, canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        canvas { z-index: 10; transform: scaleX(-1); }
+        video { transform: scaleX(-1); }
+        .status-banner {
+            margin-bottom: 15px;
+            font-size: 14px;
+            font-weight: 600;
+            color: #94a3b8;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            text-align: center;
+        }
+        .overlay-grid {
+            position: absolute;
+            inset: 0;
+            border: 2px dashed rgba(255,255,255,0.05);
+            pointer-events: none;
+            z-index: 5;
+        }
+        .oval-target {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-translate, -50%);
+            width: 220px;
+            height: 280px;
+            border: 2px dashed #22c55e;
+            border-radius: 50%;
+            z-index: 6;
+            pointer-events: none;
+            box-shadow: 0 0 0 9999px rgba(15, 23, 42, 0.6);
+            transform: translate(-50%, -50%);
+        }
     </style>
 </head>
 <body>
 
-    <div class="container">
-        <h3 id="display-title">Awaiting Parent Command Configuration...</h3>
-        <div class="camera-box">
-            <video id="video-feed" autoplay playsinline muted></video>
-            <div class="target-ring"></div>
-            <div class="laser-line"></div>
-        </div>
+    <div class="status-banner" id="label-hud-alert">Instantiating Neural Networks...</div>
+    
+    <div class="scanner-container">
+        <div class="overlay-grid"></div>
+        <div class="oval-target" id="target-alignment-frame"></div>
+        <video id="hardware-video-stream" autoplay silenced playsinline></video>
+        <canvas id="vector-canvas-layer"></canvas>
     </div>
 
     <script>
-        // CHANGE THIS: Ensure this matches your absolute Apps Script Exec URL ending in /exec
-        const GOOGLE_BACKEND_ENDPOINT = "https://script.google.com/a/macros/globe.com.ph/s/AKfycbz5n0WvJOhnd8EtQcgy4Fxp-vSMCQssk6bd9R5sqkfa2h-3dR_cLaBlUz1kxlgVabYV/exec";
+        const videoElement = document.getElementById('hardware-video-stream');
+        const canvasElement = document.getElementById('vector-canvas-layer');
+        const hudAlert = document.getElementById('label-hud-alert');
+        
+        let targetActionContext = "Clock In";
+        let corporateRosterDataset = [];
+        let modelWeightsLoaded = false;
+        let scanSequenceActive = true;
 
-        let mediaStream = null;
-        let scanAnimationId = null;
-        let targetAction = "Clock In";
-        let syncToken = "";
-        let memoryEmployeeRoster = [];
+        // Parse ambient action parameters directly out of the incoming location URI
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.has('action')) {
+            targetActionContext = urlParams.get('action');
+        }
 
-        // Catch the background roster data package passed down from the parent window context
-        window.addEventListener("message", async (event) => {
-            if (event.data && event.data.type === "INITIALIZE_DIRECTORY_ROSTER") {
-                targetAction = event.data.action;
-                syncToken = event.data.token;
-                memoryEmployeeRoster = event.data.roster;
+        window.addEventListener("DOMContentLoaded", async () => {
+            try {
+                hudAlert.innerText = "Loading Matrix Weights [face-api.js]...";
                 
-                document.getElementById('display-title').innerText = `Align Face Inside Ring to ${targetAction}`;
-                await initializeBiometricHardware();
+                // Fetch pre-compiled weights down to the edge cache layer
+                const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
+                await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
+                await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+                await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+                
+                modelWeightsLoaded = true;
+                hudAlert.innerText = "Connecting handshake link to parent dashboard...";
+
+                // TWO-WAY HANDSHAKE: Signal back to Index.html that CDNs are loaded and ready to receive rosters
+                if (window.opener) {
+                    window.opener.postMessage({ type: "SCANNER_READY" }, "*");
+                } else {
+                    hudAlert.innerText = "CORS Link Fault: Missing parent window context.";
+                }
+
+            } catch (err) {
+                hudAlert.innerText = "CDN Initialization Exception: " + err.message;
+                hudAlert.style.color = "#ef4444";
             }
         });
 
-        async function initializeBiometricHardware() {
+        // RECEPTACLE LISTENER: Intercepts the master roster payload emitted by Index.html
+        window.addEventListener("message", async (event) => {
+            // Insulate cross-origin execution to avoid memory crashes
+            if (event.data && event.data.type === "INITIALIZE_SCANNER_ROSTER") {
+                corporateRosterDataset = event.data.roster || [];
+                hudAlert.innerText = "Activating camera stream node...";
+                await initializeHardwareCameraStream();
+            }
+        });
+
+        async function initializeHardwareCameraStream() {
             try {
-                const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
-                await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
-                await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
-                
-                mediaStream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { width: 640, height: 480, facingMode: "user" }, audio: false 
+                const mediaStream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        width: { ideal: 640 },
+                        height: { ideal: 480 },
+                        facingMode: "user"
+                    },
+                    audio: false
                 });
                 
-                document.getElementById('video-feed').srcObject = mediaStream;
-                runScannerLoop();
-            } catch(e) {
-                alert("Webcam Initialization Fault: " + e.message);
-                window.close();
-            }
-        }
-
-        function runScannerLoop() {
-            let frameCounter = 0;
-            const videoEl = document.getElementById('video-feed');
-
-            async function checkFrame() {
-                if (!mediaStream) return;
-                frameCounter++;
+                videoElement.srcObject = mediaStream;
                 
-                if (frameCounter % 4 === 0) {
-                    const foundFace = await faceapi.detectSingleFace(videoEl, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks();
-                    
-                    if (foundFace) {
-                        // Extract tracking landmarks vector points array coordinates signature matrix maps
-                        const liveDescriptor = foundFace.descriptor || foundFace.landmarks.positions.map(p => p.x / 640);
-                        
-                        // IDENTITY RESOLUTION ENGINE: Scan descriptor arrays against the complete dataset roster
-                        let bestMatchedProfile = null;
-                        let minimumDistanceFound = 1.0; // Baseline Euclidean threshold infinity map maximum parameter bounds
-
-                        memoryEmployeeRoster.forEach(employee => {
-                            if (!employee.descriptor || employee.descriptor.length !== 128) return;
-                            
-                            // Calculate absolute geometric distance between the live camera feed and master array coordinates
-                            let distanceAccumulator = 0;
-                            for (let i = 0; i < 128; i++) {
-                                let diff = liveDescriptor[i] - employee.descriptor[i];
-                                distanceAccumulator += diff * diff;
-                            }
-                            let euclideanDistance = Math.sqrt(distanceAccumulator);
-
-                            if (euclideanDistance < euclideanDistanceThreshold && euclideanDistance < minimumDistanceFound) {
-                                minimumDistanceFound = euclideanDistance;
-                                bestMatchedProfile = employee;
-                            }
-                        });
-
-                        // Standard face recognition threshold cutoff constant rules
-                        const euclideanDistanceThreshold = 0.6; 
-
-                        if (bestMatchedProfile && minimumDistanceFound <= euclideanDistanceThreshold) {
-                            document.getElementById('display-title').innerText = `Identified: ${bestMatchedProfile.name}! Submitting...`;
-                            stopHardwareTracks();
-
-                            // POST Handoff directly to Google's server instance nodes
-                            const formPayload = new URLSearchParams();
-                            formPayload.append("email", bestMatchedProfile.email);
-                            formPayload.append("name", bestMatchedProfile.name);
-                            formPayload.append("action", targetAction);
-                            formPayload.append("token", syncToken);
-                            formPayload.append("managerEmail", bestMatchedProfile.managerEmail);
-                            formPayload.append("descriptor", JSON.stringify(Array.from(liveDescriptor).slice(0, 128)));
-
-                            fetch(GOOGLE_BACKEND_ENDPOINT, {
-                                method: "POST",
-                                mode: "no-cors",
-                                headers: { "Content-Type": "application/x-www-form-urlencoded" },
-                                body: formPayload.toString()
-                            })
-                            .then(() => window.close())
-                            .catch(() => window.close());
-                            return;
-                        } else {
-                            document.getElementById('display-title').innerText = "Unknown Profile. Align face cleaner...";
-                        }
-                    }
-                }
-                scanAnimationId = requestAnimationFrame(checkFrame);
+                videoElement.onloadedmetadata = () => {
+                    hudAlert.innerText = `Align Face for ${targetActionContext}...`;
+                    // Begin looping facial extraction algorithms at 10 frames per second
+                    setTimeout(executeBiometricExtractionLoop, 800);
+                };
+            } catch (err) {
+                hudAlert.innerText = "Hardware Stream Denied: " + err.message;
+                hudAlert.style.color = "#ef4444";
             }
-            scanAnimationId = requestAnimationFrame(checkFrame);
         }
 
-        function stopHardwareTracks() {
-            if (scanAnimationId) cancelAnimationFrame(scanAnimationId);
-            if (mediaStream) { mediaStream.getTracks().forEach(track => track.stop()); mediaStream = null; }
-            document.getElementById('video-feed').srcObject = null;
+        async function executeBiometricExtractionLoop() {
+            if (!scanSequenceActive) return;
+
+            try {
+                // Compute landmarks from the raw hardware frame
+                const detectionResult = await faceapi.detectSingleFace(videoElement)
+                    .withFaceLandmarks()
+                    .withFaceDescriptor();
+
+                if (detectionResult) {
+                    const currentLiveDescriptor = detectionResult.descriptor;
+                    let optimizedMatchAsset = null;
+                    let lowestEuclideanDistance = 0.55; // Strict match boundary cutoff
+
+                    // O(N) Linear Scan Search: Match real-time coordinates against corporate matrices
+                    corporateRosterDataset.forEach(employeeProfile => {
+                        if (employeeProfile.descriptor && employeeProfile.descriptor.length === 128) {
+                            const currentDistance = faceapi.euclideanDistance(currentLiveDescriptor, employeeProfile.descriptor);
+                            if (currentDistance < lowestEuclideanDistance) {
+                                lowestEuclideanDistance = currentDistance;
+                                optimizedMatchAsset = employeeProfile;
+                            }
+                        }
+                    });
+
+                    if (optimizedMatchAsset) {
+                        // MATCH CONFIRMED: Stop looping and pass verification metadata back to Apps Script
+                        scanSequenceActive = false;
+                        hudAlert.innerText = "MATCH VERIFIED! Syncing transaction logs...";
+                        document.getElementById('target-alignment-frame').style.borderColor = "#22c55e";
+
+                        if (window.opener) {
+                            window.opener.postMessage({
+                                type: "BIOMETRIC_RESPONSE",
+                                matched: true,
+                                email: optimizedMatchAsset.email,
+                                name: optimizedMatchAsset.name,
+                                managerEmail: optimizedMatchAsset.managerEmail,
+                                role: optimizedMatchAsset.role || "Employee",
+                                action: targetActionContext
+                            }, "*");
+                        }
+                        
+                        setTimeout(() => { window.close(); }, 1200);
+                        return;
+                    } else {
+                        hudAlert.innerText = "Scanning... Frame profile alignment required.";
+                        document.getElementById('target-alignment-frame').style.borderColor = "#f59e0b";
+                    }
+                } else {
+                    hudAlert.innerText = "No face detected inside tracking boundaries.";
+                    document.getElementById('target-alignment-frame').style.borderColor = "#ef4444";
+                }
+            } catch (err) {
+                console.error("Frame processing fault handled cleanly: ", err);
+            }
+
+            // Loop back into frame tracking queue memory stack
+            if (scanSequenceActive) {
+                setTimeout(executeBiometricExtractionLoop, 150);
+            }
         }
     </script>
 </body>
