@@ -94,16 +94,21 @@
     </div>
 
     <script>
+        // 1. CRITICAL: Paste your exact Apps Script Web App Deployment URL here (the long one ending in /exec)
+        const GOOGLE_BACKEND_ENDPOINT = "https://script.google.com/a/macros/globe.com.ph/s/AKfycbz5n0WvJOhnd8EtQcgy4Fxp-vSMCQssk6bd9R5sqkfa2h-3dR_cLaBlUz1kxlgVabYV/exec";
+
         let mediaStream = null;
         let scanAnimationId = null;
         let targetAction = "Clock In";
 
+        // Read global URL parameter tags out of the context request strings safely
+        const urlParams = new URLSearchParams(window.location.search);
+        const userEmail = urlParams.get('email') || "";
+        const userName = urlParams.get('name') || "Terminal User";
+        const syncToken = urlParams.get('token') || "";
+        if (urlParams.has('action')) { targetAction = urlParams.get('action'); }
+
         window.addEventListener('DOMContentLoaded', async () => {
-            // 1. Read URL parameters passed from your main app (?action=Clock In)
-            const urlParams = new URLSearchParams(window.location.search);
-            if (urlParams.has('action')) {
-                targetAction = urlParams.get('action');
-            }
             document.getElementById('display-title').innerText = `Align Face Inside Ring to ${targetAction}`;
 
             try {
@@ -114,8 +119,7 @@
                 
                 // 3. Request raw camera device tracks cleanly outside Google's sandbox frames
                 mediaStream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { width: 640, height: 480, facingMode: "user" }, 
-                    audio: false 
+                    video: { width: 640, height: 480, facingMode: "user" }, audio: false 
                 });
                 
                 const videoEl = document.getElementById('video-feed');
@@ -124,7 +128,7 @@
                 // 4. Start the face landmark mapping scanner loop
                 runScannerLoop();
             } catch(e) {
-                alert("Camera Access Error: " + e.message + "\nEnsure camera hardware is enabled and authorized.");
+                alert("Camera Initialization Error: " + e.message + "\nEnsure camera hardware is enabled and authorized.");
                 window.close();
             }
         });
@@ -146,19 +150,30 @@
                         const rawDescriptor = Array.from(foundFace.descriptor || foundFace.landmarks.positions.map(p => p.x / 640));
                         const clean128VectorArray = rawDescriptor.slice(0, 128);
                         
-                        // 5. CROSS-WINDOW MESSAGING BRIDGE
-                        // Fires the final 128-float mathematical matrix string back into your parent tab
-                        if (window.opener) {
-                            window.opener.postMessage({
-                                type: "BIOMETRIC_VECTOR_SIGNAL",
-                                action: targetAction,
-                                descriptor: clean128VectorArray
-                            }, "*");
-                        }
-                        
-                        // 6. Tear down hardware streams and close popup automatically
+                        document.getElementById('display-title').innerText = "Face captured! Processing database handshake...";
                         stopHardwareTracks();
-                        window.close();
+
+                        // 5. HIGH-SPEED DIRECT BACKEND CLOUD HANDSHAKE
+                        const formPayload = new URLSearchParams();
+                        formPayload.append("email", userEmail);
+                        formPayload.append("name", userName);
+                        formPayload.append("action", targetAction);
+                        formPayload.append("token", syncToken); // Injects the synchronization token pass-key
+                        formPayload.append("descriptor", JSON.stringify(cleanVectorArray));
+
+                        fetch(GOOGLE_BACKEND_ENDPOINT, {
+                            method: "POST",
+                            mode: "no-cors",
+                            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                            body: formPayload.toString()
+                        })
+                        .then(() => {
+                            window.close(); // Closes instantly when data package registers on the backend server
+                        })
+                        .catch(err => {
+                            alert("Transmission failure: " + err.message);
+                            window.close();
+                        });
                         return;
                     }
                 }
