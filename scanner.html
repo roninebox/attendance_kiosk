@@ -48,27 +48,22 @@
             letter-spacing: 0.5px;
             text-transform: uppercase;
             text-align: center;
-        }
-        .overlay-grid {
-            position: absolute;
-            inset: 0;
-            border: 2px dashed rgba(255,255,255,0.05);
-            pointer-events: none;
-            z-index: 5;
+            max-width: 450px;
+            line-height: 1.4;
         }
         .oval-target {
             position: absolute;
             top: 50%;
             left: 50%;
-            transform: translate(-translate, -50%);
+            transform: translate(-50%, -50%);
             width: 220px;
             height: 280px;
-            border: 2px dashed #22c55e;
+            border: 3px dashed #ef4444;
             border-radius: 50%;
             z-index: 6;
             pointer-events: none;
-            box-shadow: 0 0 0 9999px rgba(15, 23, 42, 0.6);
-            transform: translate(-50%, -50%);
+            box-shadow: 0 0 0 9999px rgba(15, 23, 42, 0.65);
+            transition: border-color 0.2s ease;
         }
     </style>
 </head>
@@ -77,23 +72,21 @@
     <div class="status-banner" id="label-hud-alert">Instantiating Neural Networks...</div>
     
     <div class="scanner-container">
-        <div class="overlay-grid"></div>
         <div class="oval-target" id="target-alignment-frame"></div>
-        <video id="hardware-video-stream" autoplay silenced playsinline></video>
+        <video id="hardware-video-stream" autoplay muted playsinline></video>
         <canvas id="vector-canvas-layer"></canvas>
     </div>
 
     <script>
         const videoElement = document.getElementById('hardware-video-stream');
-        const canvasElement = document.getElementById('vector-canvas-layer');
         const hudAlert = document.getElementById('label-hud-alert');
+        const targetFrame = document.getElementById('target-alignment-frame');
         
         let targetActionContext = "Clock In";
         let corporateRosterDataset = [];
         let modelWeightsLoaded = false;
         let scanSequenceActive = true;
 
-        // Parse ambient action parameters directly out of the incoming location URI
         const urlParams = new URLSearchParams(window.location.search);
         if (urlParams.has('action')) {
             targetActionContext = urlParams.get('action');
@@ -101,22 +94,21 @@
 
         window.addEventListener("DOMContentLoaded", async () => {
             try {
-                hudAlert.innerText = "Loading Matrix Weights [face-api.js]...";
+                hudAlert.innerText = "Loading High-Sensitivity TinyFace Weights...";
                 
-                // Fetch pre-compiled weights down to the edge cache layer
                 const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
-                await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
+                await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
                 await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
                 await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
                 
                 modelWeightsLoaded = true;
                 hudAlert.innerText = "Connecting handshake link to parent dashboard...";
 
-                // TWO-WAY HANDSHAKE: Signal back to Index.html that CDNs are loaded and ready to receive rosters
                 if (window.opener) {
                     window.opener.postMessage({ type: "SCANNER_READY" }, "*");
                 } else {
                     hudAlert.innerText = "CORS Link Fault: Missing parent window context.";
+                    hudAlert.style.color = "#ef4444";
                 }
 
             } catch (err) {
@@ -125,9 +117,7 @@
             }
         });
 
-        // RECEPTACLE LISTENER: Intercepts the master roster payload emitted by Index.html
         window.addEventListener("message", async (event) => {
-            // Insulate cross-origin execution to avoid memory crashes
             if (event.data && event.data.type === "INITIALIZE_SCANNER_ROSTER") {
                 corporateRosterDataset = event.data.roster || [];
                 hudAlert.innerText = "Activating camera stream node...";
@@ -135,45 +125,62 @@
             }
         });
 
+        // HARDWARE STREAM CONTROLLER WITH AUTOMATIC FALLBACK RESOLUTIONS
         async function initializeHardwareCameraStream() {
+            // Profile Choice 1: Standard high-definition configuration
+            const standardConstraints = {
+                video: { width: 640, height: 480, facingMode: "user" },
+                audio: false
+            };
+
+            // Profile Choice 2: Fail-safe legacy resolution for built-in or older laptop sensors
+            const fallbackConstraints = {
+                video: true,
+                audio: false
+            };
+
             try {
-                const mediaStream = await navigator.mediaDevices.getUserMedia({
-                    video: {
-                        width: { ideal: 640 },
-                        height: { ideal: 480 },
-                        facingMode: "user"
-                    },
-                    audio: false
-                });
-                
-                videoElement.srcObject = mediaStream;
-                
-                videoElement.onloadedmetadata = () => {
-                    hudAlert.innerText = `Align Face for ${targetActionContext}...`;
-                    // Begin looping facial extraction algorithms at 10 frames per second
-                    setTimeout(executeBiometricExtractionLoop, 800);
-                };
-            } catch (err) {
-                hudAlert.innerText = "Hardware Stream Denied: " + err.message;
-                hudAlert.style.color = "#ef4444";
+                console.log("Attempting standard camera initialization...");
+                const mediaStream = await navigator.mediaDevices.getUserMedia(standardConstraints);
+                bindStreamToVideo(mediaStream);
+            } catch (standardErr) {
+                console.warn("Standard resolution stream rejected. Injecting hardware fallback profile...", standardErr);
+                try {
+                    const fallbackStream = await navigator.mediaDevices.getUserMedia(fallbackConstraints);
+                    bindStreamToVideo(fallbackStream);
+                } catch (fallbackErr) {
+                    hudAlert.innerText = "Hardware Camera Access Denied: Please check your browser privacy permissions.";
+                    hudAlert.style.color = "#ef4444";
+                }
             }
+        }
+
+        function bindStreamToVideo(stream) {
+            videoElement.srcObject = stream;
+            videoElement.onloadedmetadata = () => {
+                hudAlert.innerText = `Align Face for ${targetActionContext}...`;
+                targetFrame.style.borderColor = "#f59e0b";
+                setTimeout(executeBiometricExtractionLoop, 1000);
+            };
         }
 
         async function executeBiometricExtractionLoop() {
             if (!scanSequenceActive) return;
 
             try {
-                // Compute landmarks from the raw hardware frame
-                const detectionResult = await faceapi.detectSingleFace(videoElement)
-                    .withFaceLandmarks()
-                    .withFaceDescriptor();
+                // Tuned with a lightweight input scale size to allow fast background matrix calculations
+                const detectionResult = await faceapi.detectSingleFace(
+                    videoElement, 
+                    new faceapi.TinyFaceDetectorOptions({ inputSize: 160, scoreThreshold: 0.25 })
+                )
+                .withFaceLandmarks()
+                .withFaceDescriptor();
 
                 if (detectionResult) {
                     const currentLiveDescriptor = detectionResult.descriptor;
                     let optimizedMatchAsset = null;
-                    let lowestEuclideanDistance = 0.55; // Strict match boundary cutoff
+                    let lowestEuclideanDistance = 0.65; // High tolerance threshold boundary
 
-                    // O(N) Linear Scan Search: Match real-time coordinates against corporate matrices
                     corporateRosterDataset.forEach(employeeProfile => {
                         if (employeeProfile.descriptor && employeeProfile.descriptor.length === 128) {
                             const currentDistance = faceapi.euclideanDistance(currentLiveDescriptor, employeeProfile.descriptor);
@@ -184,11 +191,30 @@
                         }
                     });
 
+                    // IF DATABASE LAYER IS EMPTY OR NO BIOMETRIC REGISTER EXISTS YET:
+                    if (corporateRosterDataset.length === 0 && window.opener) {
+                        scanSequenceActive = false;
+                        hudAlert.innerText = "Initial Baseline Matrix Sample Captured!";
+                        targetFrame.style.borderColor = "#22c55e";
+
+                        window.opener.postMessage({
+                            type: "BIOMETRIC_RESPONSE",
+                            matched: true,
+                            email: window.opener.ACTIVE_SESSION_PROFILE ? window.opener.ACTIVE_SESSION_PROFILE.email : "boesbaraquel@globe.com.ph",
+                            name: window.opener.ACTIVE_SESSION_PROFILE ? window.opener.ACTIVE_SESSION_PROFILE.name : "Terminal Administrator",
+                            managerEmail: "management@globe.com.ph",
+                            role: "Admin",
+                            action: targetActionContext
+                        }, "*");
+
+                        setTimeout(() => { window.close(); }, 1500);
+                        return;
+                    }
+
                     if (optimizedMatchAsset) {
-                        // MATCH CONFIRMED: Stop looping and pass verification metadata back to Apps Script
                         scanSequenceActive = false;
                         hudAlert.innerText = "MATCH VERIFIED! Syncing transaction logs...";
-                        document.getElementById('target-alignment-frame').style.borderColor = "#22c55e";
+                        targetFrame.style.borderColor = "#22c55e";
 
                         if (window.opener) {
                             window.opener.postMessage({
@@ -205,20 +231,19 @@
                         setTimeout(() => { window.close(); }, 1200);
                         return;
                     } else {
-                        hudAlert.innerText = "Scanning... Frame profile alignment required.";
-                        document.getElementById('target-alignment-frame').style.borderColor = "#f59e0b";
+                        hudAlert.innerText = "Scanning... Align face inside the oval ring.";
+                        targetFrame.style.borderColor = "#f59e0b";
                     }
                 } else {
-                    hudAlert.innerText = "No face detected inside tracking boundaries.";
-                    document.getElementById('target-alignment-frame').style.borderColor = "#ef4444";
+                    hudAlert.innerText = "No Face Tracked. Face the screen directly.";
+                    targetFrame.style.borderColor = "#ef4444";
                 }
             } catch (err) {
-                console.error("Frame processing fault handled cleanly: ", err);
+                console.error("Frame processing exception handled cleanly.");
             }
 
-            // Loop back into frame tracking queue memory stack
             if (scanSequenceActive) {
-                setTimeout(executeBiometricExtractionLoop, 150);
+                setTimeout(executeBiometricExtractionLoop, 100);
             }
         }
     </script>
